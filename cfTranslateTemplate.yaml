@@ -1,0 +1,813 @@
+###
+ # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ # SPDX-License-Identifier: MIT-0
+ #
+ # Permission is hereby granted, free of charge, to any person obtaining a copy of this
+ # software and associated documentation files (the "Software"), to deal in the Software
+ # without restriction, including without limitation the rights to use, copy, modify,
+ # merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+ # permit persons to whom the Software is furnished to do so.
+ #
+ # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+ # INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+ # PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ # HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+ # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ # Copyright Amazon.com, Inc. and its affiliates. All Rights Reserved.
+#   SPDX-License-Identifier: MIT
+######
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  This template deploys an automated and configurrable ML workflow around Amazon Translate and Amazon Augmented AI (A2I) with DyanmoDB to store customizations and  System Manager Parameter Store backed by AWS Lambda.
+Parameters:
+  SNSEmail:
+    Type: String
+    Description: Enter a valid email address for Amazon AugmentedAI workforce private team
+    AllowedPattern: "^[\\x20-\\x45]?[\\w-\\+]+(\\.[\\w]+)*@[\\w-]+(\\.[\\w]+)*(\\.[a-z]{2,})$"
+    ConstraintDescription: Please enter a valid email address
+  A2IPrivateTeamName:
+    Type: String
+    Default: ''
+    Description: Please enter a Private Team Name or leave blank to create a new one.
+  ParallelDataTableName:
+    Type: String
+    Description: Enter parallel data table name, or leave blank to create a new table.
+    Default: ''
+Conditions:
+  CreateWorkTeam: !Equals
+    - !Ref A2IPrivateTeamName
+    - ''
+  CreateDynamoDBTable: !Equals
+    - !Ref ParallelDataTableName
+    - ''
+Resources:
+  DynamoDBParallelData:
+    Condition: CreateDynamoDBTable
+    DeletionPolicy: Retain
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "translate_parallel_data"
+      AttributeDefinitions:
+        - AttributeName: "targetLanguageCode"
+          AttributeType: "S"
+        - AttributeName: "source"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "targetLanguageCode"
+          KeyType: "HASH"
+        - AttributeName: "source"
+          KeyType: "RANGE"
+      BillingMode: PAY_PER_REQUEST
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods:
+              - GET
+            AllowedOrigins:
+              - "*"
+  S3BucketPolicy:
+        Type: AWS::S3::BucketPolicy
+        Properties:
+          Bucket: !Ref S3Bucket
+          PolicyDocument: !Sub |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "${AWS::StackId}",
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Service": "translate.amazonaws.com"
+                  },
+                  "Action": [
+                    "s3:GetBucketAcl",
+                    "s3:GetBucketLocation"
+                  ],
+                  "Resource": "${S3Bucket.Arn}"
+                },
+                {
+                  "Sid": "${AWS::StackId}",
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Service": "translate.amazonaws.com"
+                  },
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectAcl",
+                    "s3:GetObjectVersion",
+                    "s3:GetObjectTagging"
+                  ],
+                  "Resource": "${S3Bucket.Arn}/*"
+                },
+                {
+                  "Sid": "${AWS::StackId}",
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Service": "translate.amazonaws.com"
+                  },
+                  "Action": "s3:GetBucketAcl",
+                  "Resource": "${S3Bucket.Arn}"
+                },
+                {
+                  "Sid": "${AWS::StackId}",
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Service": "translate.amazonaws.com"
+                  },
+                  "Action": "s3:PutObject",
+                  "Resource": "${S3Bucket.Arn}/*",
+                  "Condition": {
+                    "StringEquals": {
+                      "s3:x-amz-acl": "bucket-owner-full-control"
+                    }
+                  }
+                }
+              ]
+            }
+  TranslationJobCompletionLambdaExecRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "TJCLambdaExecutionRole"]]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: "AllowInvoke"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action: "lambda:InvokeFunction"
+            Resource: "*"
+      - PolicyName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "TJCLambdaExecutionPolicy"]]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: !Join ["/", [!Join [":",["arn:aws:iam:",!Ref AWS::AccountId,"role"]], "*"]]
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Join [":", ["arn:aws:logs:*", !Ref AWS::AccountId, "*"]]
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter*
+              - ssm:PutParameter
+            Resource: !Join ["/", [!Join [":", ["arn:aws:ssm", !Ref AWS::Region, !Ref AWS::AccountId, "parameter"]], !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]
+          - Effect: Allow
+            Action:
+              - sagemaker:StartHumanLoop
+              - sagemaker:DescribeWorkteam
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - translate:DescribeTextTranslationJob
+            Resource: "*"
+  WorkflowCompletionLambdaExecRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "HWCLambdaExecutionRole"]]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: "AllowInvoke"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action: "lambda:InvokeFunction"
+            Resource: "*"
+      - PolicyName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "HWCLambdaExecutionPolicy"]]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: !Join ["/", [!Join [":",["arn:aws:iam:",!Ref AWS::AccountId,"role"]], "*"]]
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Join [":", ["arn:aws:logs:*", !Ref AWS::AccountId, "*"]]
+          - Effect: Allow
+            Action:
+              - translate:ListParallelData
+              - translate:CreateParallelData
+              - translate:UpdateParallelData
+            Resource: "*"
+  LambdaStageA2IAssetsLambdaExecRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "A2IAssetsLambdaExecutionRole"]]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: "AllowInvoke"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action: "lambda:InvokeFunction"
+            Resource: "*"
+      - PolicyName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "A2IAssetsLambdaExecutionPolicy"]]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: !Join ["/", [!Join [":",["arn:aws:iam:",!Ref AWS::AccountId,"role"]], "*"]]
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Join [":", ["arn:aws:logs:*", !Ref AWS::AccountId, "*"]]
+          - Effect: Allow
+            Action:
+              - events:EnableRule
+              - events:DisableRule
+              - events:PutRule
+            Resource: !Join ["/",[!Join [":", ["arn:aws:events", !Ref AWS::Region, !Ref AWS::AccountId, "rule"]], !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]]]
+          - Effect: Allow
+            Action:
+              - sagemaker:DeleteFlowDefinition
+              - sagemaker:CreateFlowDefinition
+              - sagemaker:DescribeFlowDefinition
+            Resource: !Join ["/",[!Join [":", ["arn:aws:sagemaker", !Ref AWS::Region, !Ref AWS::AccountId, "flow-definition"]], !Join ["-", ["*", !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]]]
+          - Effect: Allow
+            Action:
+              - sagemaker:DescribeHumanTaskUi
+              - sagemaker:DeleteHumanTaskUi
+              - sagemaker:CreateHumanTaskUi
+            Resource: !Join ["/",[!Join [":", ["arn:aws:sagemaker", !Ref AWS::Region, !Ref AWS::AccountId, "human-task-ui"]], !Join ["-", ["*", !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]]]
+          - Effect: Allow
+            Action:
+              - sagemaker:DescribeWorkteam
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter*
+              - ssm:PutParameter
+            Resource: !Join ["/", [!Join [":", ["arn:aws:ssm", !Ref AWS::Region, !Ref AWS::AccountId, "parameter"]], !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]
+  IAMPolicyS3:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "S3Policy"]]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectAcl
+              - s3:GetObjectVersion
+              - s3:GetObjectTagging
+              - s3:PutObject
+            Resource: !Join ["/", [!GetAtt S3Bucket.Arn, "*"]]
+          - Effect: Allow
+            Action:
+              - s3:GetBucketAcl
+              - s3:GetBucketLocation
+              - s3:ListBucket
+              - s3:PutBucketNotification
+            Resource: !GetAtt S3Bucket.Arn
+      Roles:
+        - !Ref TranslationJobCompletionLambdaExecRole
+        - !Ref LambdaStageA2IAssetsLambdaExecRole
+        - !Ref WorkflowCompletionLambdaExecRole
+        - !Ref TranslationInvokerRole
+  IAMPolicyDynamoDB:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "DDBPolicy"]]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:Query
+            - dynamodb:BatchGetItem
+            - dynamodb:DescribeTable
+            - dynamodb:GetItem
+            - dynamodb:Scan
+            Resource:  !Join ["/",[!Join [":", ["arn:aws:dynamodb:*", !Ref AWS::AccountId, "table"]], !If [CreateDynamoDBTable, !Ref DynamoDBParallelData, !Ref ParallelDataTableName]]]
+      Roles:
+        - !Ref WorkflowCompletionLambdaExecRole
+  IAMPolicyEvents:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "CWEvents"]]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+            - events:Put*
+            - events:Get*
+            - events:List*
+            Resource:  "*"
+      Roles:
+        - !Ref LambdaStageA2IAssetsLambdaExecRole
+        - !Ref TranslationInvokerRole
+  TranslationInvokerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "TranslationInvokerRole"]]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: translate.amazonaws.com
+          Action: sts:AssumeRole
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TranslationInvokerExePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'translate:*'
+                  - 'comprehend:DetectDominantLanguage'
+                  - 'cloudwatch:GetMetricStatistics'
+                  - 'cloudwatch:ListMetrics'
+                Resource: '*'
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Join ["/", [!Join [":",["arn:aws:iam:",!Ref AWS::AccountId,"role"]], "*"]]
+  EventsRuleTransformJobEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "tjc"]]
+      EventPattern:
+        source:
+          - "aws.translate"
+        detail-type:
+          - "Translate TextTranslationJob State Change"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt LambdaTranslationJobCompletionHandler.Arn
+          Id: !Join ["-", [!Ref AWS::StackName, "tjc"]]
+  EventsRuleHumanWorkflowCompletionEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "hwc"]]
+      EventPattern:
+        source:
+          - "aws.sagemaker"
+        detail-type:
+          - "SageMaker A2I HumanLoop Status Change"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt LambdaWorkflowCompletionHandler.Arn
+          Id: !Join ["-", [!Ref AWS::StackName, "hwc"]]
+  TranslationJobInvokerEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "tji"]]
+      ScheduleExpression: "cron(0 7 ? * MON-FRI *)"
+      Targets:
+        - Arn: !GetAtt LambdaTranslationJobInvoker.Arn
+          Id: !Join ["-", [!Ref AWS::StackName, "tji"]]
+  ParallelDataUpdateEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "pdu"]]
+      ScheduleExpression: "cron(0 * ? * MON-FRI *)"
+      Targets:
+        - Arn: !GetAtt LambdaUpdateParallelData.Arn
+          Id: !Join ["-", [!Ref AWS::StackName, "pdu"]]
+  TranslationJobInvokerEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt LambdaTranslationJobInvoker.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt TranslationJobInvokerEvent.Arn
+  ParallelDataUpdateEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt LambdaUpdateParallelData.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ParallelDataUpdateEvent.Arn
+  HumanWorkflowCompletionEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt LambdaWorkflowCompletionHandler.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventsRuleHumanWorkflowCompletionEvent.Arn
+  TransformJobEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt LambdaTranslationJobCompletionHandler.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventsRuleTransformJobEvent.Arn
+  CognitoUserPool:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: True
+      UserPoolName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "user-pool"]]
+  CognitoUserPoolUser:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPoolUser
+    Properties:
+      UserAttributes:
+        - Name: email
+          Value: !Ref SNSEmail
+      Username: !Ref SNSEmail
+      UserPoolId: !Ref CognitoUserPool
+  CognitoUserPoolGroup:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "user-group"]]
+      UserPoolId: !Ref CognitoUserPool
+  CognitoUserPoolUserToGroupAttachment:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPoolUserToGroupAttachment
+    Properties:
+      GroupName: !Ref CognitoUserPoolGroup
+      Username: !Ref CognitoUserPoolUser
+      UserPoolId: !Ref CognitoUserPool
+  CognitoUserPoolDomain:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Join ["-", ["ta2i", !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+      UserPoolId: !Ref CognitoUserPool
+  CognitoUserPoolClient:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "app-client"]]
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      ExplicitAuthFlows:
+        - ALLOW_CUSTOM_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      CallbackURLs:
+        - http://localhost
+      LogoutURLs:
+        - http://localhost
+      PreventUserExistenceErrors: ENABLED
+      DefaultRedirectURI: http://localhost
+      GenerateSecret: true
+      SupportedIdentityProviders:
+        - COGNITO
+      UserPoolId: !Ref CognitoUserPool
+  ParameterSystemVariables:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: Do NOT modify this value. This is a reserved parameter consisting of environmental variables and operation data. The value is used and updated by Lambda functions.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "For-System-Use-Only"]]
+      Type: String
+      Value: !Sub |
+        {
+          "s3_bucket": "${S3Bucket}",
+          "a2i_workflow": false
+        }
+  FlowDefinitionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Flow-Definition-Role"]]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: sagemaker.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Flow-Definition-Policy"]]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            Resource: !Join ["/", [!GetAtt S3Bucket.Arn, "*"]]
+          - Effect: Allow
+            Action:
+            - s3:ListBucket
+            Resource: !GetAtt S3Bucket.Arn
+  A2IWorkteam:
+      Condition: CreateWorkTeam
+      Type: AWS::SageMaker::Workteam
+      Properties:
+        Description: Translate A2I Demo
+        MemberDefinitions:
+          - CognitoMemberDefinition:
+              CognitoClientId: !Ref CognitoUserPoolClient
+              CognitoUserGroup: !Ref CognitoUserPoolGroup
+              CognitoUserPool: !Ref CognitoUserPool
+        WorkteamName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "a2i-work-team"]]
+
+  A2IWorkFlowAssets:
+    Type: Custom::A2IWorkFlowAssets
+    Properties:
+      ServiceToken: !GetAtt LambdaStageA2IAssets.Arn
+      StackPrefix: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+      TaskUiTemplate: !FindInMap [A2I, Template, TaskUiTemplate]
+      WorkTeam: !If [CreateWorkTeam, !GetAtt A2IWorkteam.WorkteamName, !Ref A2IPrivateTeamName]
+      FlowDefinitionRole: !GetAtt FlowDefinitionRole.Arn
+      S3Bucket: !Ref S3Bucket
+      ParameterName: !Ref ParameterSystemVariables
+  LambdaStageA2IAssets:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", ["stage-a2i-assets",  !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaStageA2IAssets]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaStageA2IAssetsLambdaExecRole.Arn
+    DependsOn: S3Bucket
+  NLTKLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: nltk-layer
+      Description: Dependencies for the nltk pythn lib and data.
+      Content:
+        S3Bucket: aws-ml-blog
+        S3Key: artifacts/amazon-translate-a2i-workflow/nltk-layer.zip
+      CompatibleRuntimes:
+        - python3.8
+  LambdaTranslationJobCompletionHandler:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", ["translationJobCompletionHandler", !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+      Layers:
+        - !Ref NLTKLayer
+      Code:
+        S3Bucket: aws-ml-blog
+        S3Key: artifacts/amazon-translate-a2i-workflow/translation-helix.zip
+      Handler: translateJobCompletionHandler.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt TranslationJobCompletionLambdaExecRole.Arn
+      MemorySize: 512
+      Timeout: 600
+      Environment:
+        Variables:
+          NLTK_DATA: /opt/nltk_data
+          SSMParameterName: !Ref ParameterSystemVariables
+  LambdaWorkflowCompletionHandler:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", ["workflowCompletionHandler",  !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+      Layers:
+        - !Ref NLTKLayer
+      Code:
+        S3Bucket: aws-ml-blog
+        S3Key: artifacts/amazon-translate-a2i-workflow/translation-helix.zip
+      Handler: workflowCompletionHandler.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt WorkflowCompletionLambdaExecRole.Arn
+      MemorySize: 512
+      Timeout: 600
+  LambdaTranslationJobInvoker:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", ["translationJobInvoker",  !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+      Code:
+        S3Bucket: aws-ml-blog
+        S3Key: artifacts/amazon-translate-a2i-workflow/translation-helix.zip
+      Handler: translateJobInvoker.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt TranslationInvokerRole.Arn
+      MemorySize: 512
+      Timeout: 600
+      Environment:
+        Variables:
+          BATCH_TRANSLATION_ROLE: !GetAtt TranslationInvokerRole.Arn
+          BATCH_INPUT_S3URI: !Join ["/", ["s3:/", !Ref S3Bucket, "input/"]]
+          BATCH_OUTPUT_S3URI: !Join ["/", ["s3:/", !Ref S3Bucket, "output/"]]
+          PARALLEL_DATA_NAME: !Join ["-", ["ParallelData",  !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+  LambdaUpdateParallelData:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", ["parallelDataRefresher",  !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+      Code:
+        S3Bucket: aws-ml-blog
+        S3Key: artifacts/amazon-translate-a2i-workflow/translation-helix.zip
+      Handler: updateParallelData.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt WorkflowCompletionLambdaExecRole.Arn
+      MemorySize: 512
+      Timeout: 600
+      Environment:
+        Variables:
+          PARALLEL_DATA_LOCATION: !Ref S3Bucket
+          PARALLEL_DATA_NAME: !Join ["-", ["ParallelData",  !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+Outputs:
+  A2IWorkteam:
+    Value: !GetAtt A2IWorkteam.WorkteamName
+    Condition: CreateWorkTeam
+  S3Bucket:
+    Value: !Ref S3Bucket
+  S3BucketArn:
+    Value: !GetAtt S3Bucket.Arn
+  SNSEmail:
+    Value: !Ref SNSEmail
+Mappings:
+  Lambda:
+    Settings:
+      Runtime: python3.9
+      Timeout: 15
+      Handler: index.lambda_handler
+    CodeBlock:
+      LambdaStageA2IAssets: |
+        import cfnresponse
+        import json
+        import boto3
+        sagemaker = boto3.client('sagemaker')
+        ssm = boto3.client('ssm')
+        s3 = boto3.client('s3')
+
+        def get_parameter(parameter_name):
+            response = ssm.get_parameter(Name=parameter_name)
+            parameter_value = json.loads(response['Parameter']['Value'])
+            return parameter_value
+        def lambda_handler(event, context):
+            responseData = {}
+            responseData['HumanTaskUiArn'] = 'Resource Deleted'
+            responseData['FlowDefinitionArn'] = 'Resource Deleted'
+            parameter_name = event['ResourceProperties']['ParameterName']
+            prefix = event['ResourceProperties']['StackPrefix'].lower()
+            task_ui_name = prefix + '-task-ui'
+            flow_definition_name = prefix + '-flow-definition'
+            if event['RequestType'] == 'Create':
+                try:
+                    testfile = """Life insurance companies have the freedom to charge different premiums based on risk factors that predict mortality. Purchasing a life insurance policy often entails a health status check or medical exam, and asking for vaccination status is not banned.
+                                    Health insurers are a different story. A slew of state and federal regulations in the last three decades have heavily restricted their ability to use health factors in issuing or pricing polices.
+                                    The use of health status in any group health insurance policy is prohibited by law. The Affordable Care Act, passed in 2014, prevents insurers from pricing plans according to health – with one exception: smoking status."""
+                    s3.put_object( Bucket=event['ResourceProperties']['S3Bucket'],
+                        Key="input/sample_text.txt",
+                        Body=testfile,
+                        ContentType="text/plain" )
+
+                    response = sagemaker.create_human_task_ui(
+                        HumanTaskUiName=task_ui_name,
+                        UiTemplate={
+                            'Content': event['ResourceProperties']['TaskUiTemplate']
+                        }
+                    )
+                    responseData['HumanTaskUiArn'] = response['HumanTaskUiArn']
+                    response = sagemaker.describe_workteam(WorkteamName=event['ResourceProperties']['WorkTeam'])
+                    response = sagemaker.create_flow_definition(
+                        FlowDefinitionName = flow_definition_name,
+                        RoleArn= event['ResourceProperties']['FlowDefinitionRole'],
+                        HumanLoopConfig= {
+                            "WorkteamArn": response['Workteam']['WorkteamArn'],
+                            "HumanTaskUiArn": responseData['HumanTaskUiArn'],
+                            "TaskCount": 1,
+                            "TaskDescription": "Review and correct translation issues",
+                            "TaskTitle": "Human translate review",
+                        },
+                        OutputConfig={
+                            "S3OutputPath": 's3://'+ event['ResourceProperties']['S3Bucket'] + '/a2i-human-loop-data/'
+                        }
+                    )
+                    responseData['FlowDefinitionArn'] = response['FlowDefinitionArn']
+                    parameter_value = get_parameter(parameter_name)
+                    parameter_value['flow_definition_arn'] = responseData['FlowDefinitionArn']
+                    ssm.put_parameter(Name=parameter_name, Value=json.dumps(parameter_value), Type='String',Overwrite=True)
+
+                except:
+                    cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+                else:
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+            else:
+                try:
+                    response = sagemaker.describe_flow_definition(FlowDefinitionName=flow_definition_name)
+                    responseData['FlowDefinitionArn'] = response['FlowDefinitionArn']
+                    response = sagemaker.describe_human_task_ui(HumanTaskUiName=task_ui_name)
+                    responseData['HumanTaskUiArn'] = response['HumanTaskUiArn']
+                    if event['RequestType'] == 'Delete':
+                        sagemaker.delete_flow_definition(FlowDefinitionName=flow_definition_name)
+                        sagemaker.delete_human_task_ui(HumanTaskUiName=task_ui_name)
+                        parameter_value = get_parameter(parameter_name)
+                        parameter_value['flow_definition_arn'] = ''
+                        response = ssm.put_parameter(Name=parameter_name, Value=json.dumps(parameter_value), Type='String',Overwrite=True)
+                except:
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                else:
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+            return {'message': responseData}
+  A2I:
+      Template:
+        TaskUiTemplate: |
+          <script src="https://assets.crowd.aws/crowd-html-elements.js"></script>
+          <style>
+            table, tr, th, td {
+              border: 1px solid black;
+              border-collapse: collapse;
+              padding: 5px;
+              min-width: 100%;
+              background-color: white;
+            }
+          </style>
+
+          <crowd-form>
+            <full-instructions header="Translation Quality Check Instructions">
+              <p>The source document has been broken up into sentences and each sentence has been translated using <a href="https://aws.amazon.com/translate/" target="blank" >Amazon Translate</a>. The source text, along with their
+                <strong>machine generated translation</strong> is shown in the table. Please review the translated text and make changes so it reads more like something a person would write rather than an automated translation.
+                Please do this for all the sentences. Please check the Add checkbox if you would like to add the customization to dictionary. Customization added will be automatically applied during next translation.
+                Once done, click on <strong>Submit</strong> to finish the job. The system will reassemble the edited text to match the original source formatting.
+              </p>
+
+            </full-instructions>
+              <div>
+                  <h1>Instructions</h1>
+                  <p>Please review the below translations and make corrections and improvements. Your corrections should:</p>
+                  <p>
+                    <ol>
+                     <li>Make the translated text more accurately express the meaning of the original text.</li>
+                     <li>Make the translated text read more like something a person would write rather than an automated translation.</li>
+                     <li>Please check the Add checkbox if you would like to add the customization to dictionary. Customization added will be automatically applied during next translation.</li>
+                    </ol>
+                  </p>
+              </div>
+
+              <table>
+                <tr>
+                  <th>Sentence</th>
+                  <th>Original ({{ task.input.SourceLanguage }})</th>
+                  <th>Translation ({{ task.input.TargetLanguage }})</th>
+                  <th>Add to dictionary</th>
+                </tr>
+
+                {% for pair in task.input.translationPairs %}
+
+                  <tr>
+                    <td>{{ forloop.index }}</td>
+                    <td>
+                    <crowd-text-area name="originalText{{ forloop.index }}" value="{{ pair.originalText }}"
+                    originalValue = "{{ pair.originalText }}" char-counter="true" max-rows = "3" rows="3" label="Original text">
+
+                    </crowd-text-area>
+                    </td>
+                    <td>
+                      <crowd-text-area name="translation{{ forloop.index }}" value="{{ pair.translation }}"
+                      originalValue = "{{ pair.translation }}" char-counter="true" max-rows = "3" rows="3" label="Translated text" placeholder="Please enter the translated version.">
+
+                      </crowd-text-area>
+                    </td>
+                    <td>
+                      <crowd-checkbox name="addToCustom{{ forloop.index }}">Add</crowd-checkbox>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </table>
+              <br/>
+          </crowd-form>

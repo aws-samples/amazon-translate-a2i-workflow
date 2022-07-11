@@ -1,0 +1,18 @@
+{
+  "version": "0",
+  "id": "7a9e735f-b790-583a-6eda-eb3e41d1f5de",
+  "detail-type": "SageMaker A2I HumanLoop Status Change",
+  "source": "aws.sagemaker",
+  "time": "2022-05-27T16:19:09Z",
+  "region": "us-east-1",
+  "detail": {
+    "creationTime": "2022-05-26T20:14:20.455Z",
+    "failureCode": null,
+    "failureReason": null,
+    "humanLoopName": "Translate-HumanLoop-Text1653596060257",
+    "humanLoopOutput": {
+      "outputS3Uri": "s3://awstranslate-workflow/output/translate-a2i-hrw-custom/2022/05/26/20/14/20/Translate-HumanLoop-Text1653596060257/output.json"
+    },
+    "humanLoopStatus": "Completed"
+  }
+}
