@@ -16,7 +16,15 @@ to provide customized and accurate domain specific translation results.
 
 
 ## Deployment Instructions
-NOTE: This solution only run under US-EAST1. If you need to run in a different region you will need to copy it into a regional bucket and yaml with regional s3 bucket location. Use download_artifacts.sh to download the artifacts.
+NOTE: This solution only run under US-EAST1. If you need to run in a different region you will need to copy the artifacts into a regional bucket. Use ![download_artifacts](download_artifacts.sh) to update the artifacts in your regional bucket.
+
+1. Download the contents of this repository on your local machine (say: project-directory)
+
+2. Run ```./download_artifacts.sh <<regional-bucket>> ``` This script will download artifacts from blog bucket and upload the artifacts to your regional bucket.
+
+3. Using AWS console launch this ![Cloud Formation Template](cfTranslateTemplate.yaml). Provide regional bucket name for blog bucket parameter.
+
+## Build Instructions
 
 1. Download the contents of this repository on your local machine (say: project-directory)
 
@@ -33,11 +41,11 @@ NOTE: This solution only run under US-EAST1. If you need to run in a different r
 
 ## Execution Instructions
 
-1. Follow the instructions is blog post.
+1. Follow the instructions in blog post.
 
 
 ## Further Reading:
-1. Blogpost: [Designing Human Review workflows using Amazon Translate and Amazon Augmented AI ](http://aws.amazon.com/)
+1. Blogpost: [Designing Human Review workflows using Amazon Translate and Amazon Augmented AI ](https://aws.amazon.com/blogs/machine-learning/designing-human-review-workflows-with-amazon-translate-and-amazon-augmented-ai/)
 
 ## License
 
