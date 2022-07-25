@@ -35,6 +35,10 @@ Parameters:
     Type: String
     Description: Enter parallel data table name, or leave blank to create a new table.
     Default: ''
+  blogs3bucket:
+    Type: String
+    Description: Blog artifacts from S3 bucket
+    Default: '!Ref blogs3bucket'
 Conditions:
   CreateWorkTeam: !Equals
     - !Ref A2IPrivateTeamName
@@ -579,7 +583,7 @@ Resources:
       LayerName: nltk-layer
       Description: Dependencies for the nltk pythn lib and data.
       Content:
-        S3Bucket: aws-ml-blog
+        S3Bucket: !Ref blogs3bucket
         S3Key: artifacts/amazon-translate-a2i-workflow/nltk-layer.zip
       CompatibleRuntimes:
         - python3.8
@@ -590,7 +594,7 @@ Resources:
       Layers:
         - !Ref NLTKLayer
       Code:
-        S3Bucket: aws-ml-blog
+        S3Bucket: !Ref blogs3bucket
         S3Key: artifacts/amazon-translate-a2i-workflow/translation-helix.zip
       Handler: translateJobCompletionHandler.lambda_handler
       Runtime: python3.8
@@ -608,7 +612,7 @@ Resources:
       Layers:
         - !Ref NLTKLayer
       Code:
-        S3Bucket: aws-ml-blog
+        S3Bucket: !Ref blogs3bucket
         S3Key: artifacts/amazon-translate-a2i-workflow/translation-helix.zip
       Handler: workflowCompletionHandler.lambda_handler
       Runtime: python3.8
@@ -620,7 +624,7 @@ Resources:
     Properties:
       FunctionName: !Join ["-", ["translationJobInvoker",  !Select [6, !Split ['-', !Ref AWS::StackId]]]]
       Code:
-        S3Bucket: aws-ml-blog
+        S3Bucket: !Ref blogs3bucket
         S3Key: artifacts/amazon-translate-a2i-workflow/translation-helix.zip
       Handler: translateJobInvoker.lambda_handler
       Runtime: python3.8
@@ -638,7 +642,7 @@ Resources:
     Properties:
       FunctionName: !Join ["-", ["parallelDataRefresher",  !Select [6, !Split ['-', !Ref AWS::StackId]]]]
       Code:
-        S3Bucket: aws-ml-blog
+        S3Bucket: !Ref blogs3bucket
         S3Key: artifacts/amazon-translate-a2i-workflow/translation-helix.zip
       Handler: updateParallelData.lambda_handler
       Runtime: python3.8

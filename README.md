@@ -16,6 +16,7 @@ to provide customized and accurate domain specific translation results.
 
 
 ## Deployment Instructions
+NOTE: This solution only run under US-EAST1. If you need to run in a different region you will need to copy it into a regional bucket and yaml with regional s3 bucket location. Use download_artifacts.sh to download the artifacts.
 
 1. Download the contents of this repository on your local machine (say: project-directory)
 
